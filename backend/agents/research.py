@@ -139,6 +139,7 @@ async def run_research(question: str, max_sources: int = 5, headless: bool = Tru
     # Store each paraphrased finding as its own embedded row for later
     # semantic search (tools/vector_store.match_research_docs).
     stored_ids = []
+    embedding_errors = []
     for f in findings:
         try:
             embedding = nim_embed(f.finding, input_type="passage")
@@ -146,6 +147,7 @@ async def run_research(question: str, max_sources: int = 5, headless: bool = Tru
             stored_ids.append(row.get("id"))
         except Exception as exc:  # noqa: BLE001 - don't let one bad embed kill the whole run
             logger.error("research: failed to store finding for %s: %s", f.source_url, exc)
+            embedding_errors.append({"source_url": f.source_url, "error": str(exc)})
 
     logger.info("research: question=%r sources_used=%s stored=%s", question, len(findings), len(stored_ids))
 
@@ -154,4 +156,5 @@ async def run_research(question: str, max_sources: int = 5, headless: bool = Tru
         "report": report,
         "sources": [f.source_url for f in findings],
         "stored_doc_ids": stored_ids,
+        "embedding_errors": embedding_errors,  # empty list if everything stored fine
     }

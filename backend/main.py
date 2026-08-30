@@ -24,6 +24,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("prtech.main")
 
 from orchestrator.supervisor import get_graph  # noqa: E402  (after load_dotenv)
+from agents import monitor as monitor_agent  # noqa: E402
 from tools.vector_store import select_rows  # noqa: E402
 
 app = FastAPI(title="PRTECH Business OS")
@@ -32,6 +33,13 @@ app = FastAPI(title="PRTECH Business OS")
 class ChatRequest(BaseModel):
     message: str
     history: list[dict] | None = None
+    # Structured params for agents that can't reasonably be driven by free
+    # text alone — form_fill needs {form_url, rows, field_selectors,
+    # submit_selector?, dry_run?}; monitor needs {url, selector?,
+    # alert_email?}. Omit for lead_gen/outreach/research/social, which
+    # still parse from `message` (crudely — see supervisor.py's TODO on
+    # replacing that with real LLM extraction).
+    params: dict | None = None
 
 
 class ChatResponse(BaseModel):
@@ -46,6 +54,7 @@ async def chat(req: ChatRequest):
         "user_input": req.message,
         "history": req.history or [],
         "shared_memory_refs": {},
+        "params": req.params or {},
     }
     final_state = await graph.ainvoke(initial_state)
     return ChatResponse(
@@ -69,10 +78,26 @@ async def get_outreach_log(limit: int = 100):
     return select_rows("outreach_log", limit=limit)
 
 
+class MonitorAddRequest(BaseModel):
+    url: str
+    selector: str = "body"
+    alert_email: str | None = None
+
+
 @app.post("/monitor/add")
-async def add_monitor(url: str):
-    # MVP stub — full implementation lands with the Monitor agent.
-    raise HTTPException(status_code=501, detail="Monitor agent not yet implemented")
+async def add_monitor(req: MonitorAddRequest):
+    """
+    Registers a URL by running its first check immediately (which stores
+    the baseline snapshot). There's no built-in scheduler yet — call this
+    endpoint again periodically (e.g. from a cron job or external
+    scheduler) to actually detect changes over time; each call after the
+    first compares against the most recent stored snapshot.
+    """
+    return await monitor_agent.run_monitor_check(
+        url=req.url,
+        selector=req.selector,
+        alert_email=req.alert_email,
+    )
 
 
 @app.get("/research/{doc_id}")

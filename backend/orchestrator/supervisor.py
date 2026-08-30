@@ -1,10 +1,8 @@
 """
 LangGraph supervisor graph.
 
-router -> lead_gen, router -> outreach, router -> research, and
-router -> social are fully implemented. The remaining two agents
-(form_fill, monitor) are wired in as stub nodes so the graph shape is in
-place; extend them as each is implemented in backend/agents/.
+All six agents (lead_gen, outreach, research, social, form_fill, monitor)
+are fully implemented and wired to real nodes.
 
 IMPORTANT: every node here is `async def` and the graph is driven with
 `ainvoke` (see main.py). Do NOT call `asyncio.run()` inside a node — FastAPI
@@ -71,15 +69,52 @@ async def _social_node(state: SharedState) -> SharedState:
     return state
 
 
-def _not_implemented_node(agent_name: str, coro_fn):
-    async def _node(state: SharedState) -> SharedState:
-        try:
-            await coro_fn()
-        except NotImplementedError as exc:
-            state["agent_output"] = {"error": str(exc), "agent": agent_name}
+_FORM_FILL_HELP = (
+    "form_fill needs structured params — the /chat message alone isn't enough to fill a "
+    "form safely. POST to /chat with a `params` field: "
+    '{"form_url": "...", "rows": [{"name": "...", "email": "..."}], '
+    '"field_selectors": {"name": "#full-name", "email": "input[name=email]"}, "dry_run": true}'
+)
+
+
+async def _form_fill_node(state: SharedState) -> SharedState:
+    params = state.get("params") or {}
+    if not params.get("form_url") or not params.get("rows") or not params.get("field_selectors"):
+        state["agent_output"] = {"error": _FORM_FILL_HELP}
         return state
 
-    return _node
+    result = await form_fill.run_form_fill(
+        form_url=params["form_url"],
+        rows=params["rows"],
+        field_selectors=params["field_selectors"],
+        submit_selector=params.get("submit_selector"),
+        dry_run=params.get("dry_run", True),
+    )
+    state["agent_output"] = result
+    return state
+
+
+_MONITOR_HELP = (
+    "monitor needs structured params — the /chat message alone isn't enough to identify "
+    'a URL to watch. POST to /chat with a `params` field: {"url": "https://...", '
+    '"selector": "body", "alert_email": "you@example.com"} (selector and alert_email are optional). '
+    "For repeated checks over time, call POST /monitor/add on a schedule instead."
+)
+
+
+async def _monitor_node(state: SharedState) -> SharedState:
+    params = state.get("params") or {}
+    if not params.get("url"):
+        state["agent_output"] = {"error": _MONITOR_HELP}
+        return state
+
+    result = await monitor.run_monitor_check(
+        url=params["url"],
+        selector=params.get("selector", "body"),
+        alert_email=params.get("alert_email"),
+    )
+    state["agent_output"] = result
+    return state
 
 
 async def _clarify_node(state: SharedState) -> SharedState:
@@ -103,8 +138,8 @@ def build_supervisor_graph() -> StateGraph:
     graph.add_node("outreach", _outreach_node)
     graph.add_node("social", _social_node)
     graph.add_node("research", _research_node)
-    graph.add_node("form_fill", _not_implemented_node("form_fill", form_fill.run_form_fill))
-    graph.add_node("monitor", _not_implemented_node("monitor", monitor.run_monitor))
+    graph.add_node("form_fill", _form_fill_node)
+    graph.add_node("monitor", _monitor_node)
     graph.add_node("clarify", _clarify_node)
 
     graph.set_entry_point("router")

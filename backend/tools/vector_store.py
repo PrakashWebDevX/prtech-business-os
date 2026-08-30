@@ -31,10 +31,18 @@ def insert_rows(table: str, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return resp.data or []
 
 
-def select_rows(table: str, filters: Optional[dict[str, Any]] = None, limit: int = 100) -> list[dict[str, Any]]:
+def select_rows(
+    table: str,
+    filters: Optional[dict[str, Any]] = None,
+    limit: int = 100,
+    order_by: Optional[str] = None,
+    desc: bool = False,
+) -> list[dict[str, Any]]:
     query = get_client().table(table).select("*").limit(limit)
     for col, val in (filters or {}).items():
         query = query.eq(col, val)
+    if order_by:
+        query = query.order(order_by, desc=desc)
     resp = query.execute()
     return resp.data or []
 

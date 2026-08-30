@@ -45,3 +45,8 @@ class SharedState(TypedDict, total=False):
     # Set to True by an agent node when it wants control routed back to
     # the router for a follow-up step (e.g. lead_gen -> outreach chaining)
     needs_followup: bool
+
+    # Structured params for agents that can't be reasonably driven by free
+    # text alone (form_fill, monitor). Passed through from the /chat
+    # request body's `params` field — see main.py's ChatRequest.
+    params: dict
