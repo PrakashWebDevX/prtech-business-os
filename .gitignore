@@ -1,0 +1,41 @@
+# --- Secrets: never commit real keys ---
+.env
+backend/.env
+*.env
+!.env.example
+!backend/.env.example
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+
+# --- Debug artifacts ---
+backend/debug/
+
+# --- Node / frontend ---
+node_modules/
+.next/
+out/
+dist/
+build/
+
+# --- Playwright ---
+test-results/
+playwright-report/
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+
+# --- Logs ---
+*.log
