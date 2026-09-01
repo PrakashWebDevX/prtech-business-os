@@ -28,7 +28,12 @@ create table if not exists research_docs (
   id uuid primary key default gen_random_uuid(),
   query text,
   content text,
-  embedding vector(1024), -- dimension for NVIDIA NIM's nvidia/nv-embedqa-e5-v5 (free tier)
+  -- dimension for NVIDIA NIM's nvidia/nemotron-3-embed-1b (free tier).
+  -- NVIDIA has retired embedding models before (nv-embedqa-e5-v5 went 410
+  -- Gone); if tools/llm.py's auto-discovery falls back to a different
+  -- model with a different dimension, nim_embed() will raise an error
+  -- containing the exact ALTER TABLE / CREATE FUNCTION SQL to run here.
+  embedding vector(2048),
   source_url text,
   created_at timestamptz default now()
 );
@@ -51,7 +56,7 @@ create table if not exists agent_audit_log (
 );
 
 -- Optional: similarity search RPC used by tools/vector_store.match_research_docs
-create or replace function match_research_docs(query_embedding vector(1024), match_count int)
+create or replace function match_research_docs(query_embedding vector(2048), match_count int)
 returns setof research_docs
 language sql
 as $$

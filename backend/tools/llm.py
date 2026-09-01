@@ -133,15 +133,23 @@ def nim_complete(system_prompt: str, user_prompt: str, temperature: float = 0.4,
     return resp.choices[0].message.content or ""
 
 
-# Free NIM-hosted embedding model. 1024-dim output — schema.sql's
-# `research_docs.embedding` column must match this dimension (see the
-# `vector(1024)` column type there). Only models confirmed to output
-# 1024-dim vectors belong in this list — swapping in a different-dimension
-# model without also migrating the Supabase column will fail inserts.
+# Free NIM-hosted embedding model. schema.sql's `research_docs.embedding`
+# column is `vector(2048)`, matching nvidia/nemotron-3-embed-1b's actual
+# output dimension (confirmed at runtime — NVIDIA doesn't document this
+# clearly, and it's not the same as the 1024-dim nv-embedqa-e5-v5 this
+# project started with, which was later retired). nim_embed() checks the
+# actual output dimension at runtime and raises a clear, actionable error
+# (with the exact SQL to fix it) if a fallback model's dimension doesn't
+# match the schema, rather than letting Supabase's insert fail with a
+# confusing generic error.
 _PREFERRED_EMBED_MODELS = [
-    "nvidia/nv-embedqa-e5-v5",  # 1024-dim
-    "baai/bge-m3",  # 1024-dim
+    "nvidia/nemotron-3-embed-1b",  # 2048-dim — confirmed working as of this fix
+    "nvidia/nv-embedqa-e5-v5",  # 1024-dim if it ever comes back — would need a schema migration to use
+    "baai/bge-m3",  # 1024-dim if it ever comes back — would need a schema migration to use
+    "nvidia/nv-embed-v1",  # dimension not yet confirmed by us — verified at runtime
 ]
+
+_EXPECTED_EMBED_DIM = 2048  # must match schema.sql's vector(2048) column
 
 _resolved_embed_model: str | None = None
 
@@ -181,11 +189,27 @@ def _resolve_embed_model() -> str:
             logger.info("llm: auto-selected NIM embedding model %r", candidate)
             return _resolved_embed_model
 
+    if available_ids:
+        # Last resort: pick anything embedding-model-shaped rather than
+        # hard-failing outright. If it's not actually an embedding model,
+        # or the dimension doesn't match, nim_embed's dimension check below
+        # will catch it with a clear error.
+        for model_id in sorted(available_ids):
+            if "embed" in model_id.lower():
+                _resolved_embed_model = model_id
+                logger.warning(
+                    "llm: none of the preferred embedding models are available — falling back to %r "
+                    "(unverified dimension). Check https://build.nvidia.com/models and update "
+                    "NVIDIA_EMBED_MODEL in .env if this doesn't work.",
+                    model_id,
+                )
+                return _resolved_embed_model
+
     raise RuntimeError(
-        "None of the known 1024-dim NIM embedding models "
-        f"({_PREFERRED_EMBED_MODELS}) are currently available. Check "
-        "https://build.nvidia.com/models for a live embedding model, set NVIDIA_EMBED_MODEL "
-        "in .env, and update schema.sql's vector(1024) column if its dimension differs."
+        "No embedding-capable NIM model could be found at all (checked preferred models "
+        f"{_PREFERRED_EMBED_MODELS} and scanned for any model with 'embed' in its name). "
+        "Check https://build.nvidia.com/models for a live embedding model and set "
+        "NVIDIA_EMBED_MODEL in .env."
     )
 
 
@@ -204,4 +228,20 @@ def nim_embed(text: str, input_type: str = "passage") -> list[float]:
         encoding_format="float",
         extra_body={"input_type": input_type, "truncate": "END"},
     )
-    return resp.data[0].embedding
+    embedding = resp.data[0].embedding
+
+    actual_dim = len(embedding)
+    if actual_dim != _EXPECTED_EMBED_DIM:
+        raise ValueError(
+            f"Embedding model {model!r} returned a {actual_dim}-dim vector, but Supabase's "
+            f"research_docs.embedding column is vector({_EXPECTED_EMBED_DIM}). Fix by running this "
+            "in the Supabase SQL Editor (safe if the table is currently empty; if it has rows, "
+            "back them up first since this drops existing embeddings):\n"
+            f"  alter table research_docs alter column embedding type vector({actual_dim});\n"
+            f"  create or replace function match_research_docs(query_embedding vector({actual_dim}), "
+            "match_count int) returns setof research_docs language sql as $$ select * from "
+            "research_docs order by embedding <-> query_embedding limit match_count; $$;\n"
+            "Then also update schema.sql to match so future setups don't hit this again."
+        )
+
+    return embedding
