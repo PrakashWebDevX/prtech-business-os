@@ -17,18 +17,17 @@ from langgraph.graph import END, StateGraph
 
 from agents import form_fill, lead_gen, monitor, outreach, research, social_poster
 from memory.shared_state import SharedState
+from orchestrator.param_extraction import extract_niche_location
 from orchestrator.router import router_node
 
 logger = logging.getLogger("prtech.orchestrator")
 
 
 async def _lead_gen_node(state: SharedState) -> SharedState:
-    # Very small param extraction for the MVP — replace with a proper LLM
-    # extraction step once the vertical slice is working end-to-end.
     user_input = state["user_input"]
-    niche, _, location = user_input.partition(" in ")
-    niche = niche.replace("find", "").replace("Find", "").strip() or user_input
-    location = location.strip() or "unspecified"
+    extracted = extract_niche_location(user_input)
+    niche = extracted["niche"] or user_input
+    location = extracted["location"] or "unspecified"
 
     result = await lead_gen.run_lead_gen(niche, location)
     state["agent_output"] = result
@@ -37,16 +36,13 @@ async def _lead_gen_node(state: SharedState) -> SharedState:
 
 
 async def _outreach_node(state: SharedState) -> SharedState:
-    # MVP param extraction, same caveat as lead_gen: replace with a proper
-    # LLM extraction step. Defaults to draft-only (auto_send=False) — the
-    # supervisor never auto-sends on its own; that has to be requested
-    # explicitly via the /chat payload or a follow-up confirmation step.
+    # Defaults to draft-only (auto_send=False) — the supervisor never
+    # auto-sends on its own; that has to be requested explicitly via the
+    # /chat payload or a follow-up confirmation step.
     user_input = state["user_input"]
-    niche, _, location = user_input.partition(" in ")
-    niche = niche.strip() or None
-    location = location.strip() or None
+    extracted = extract_niche_location(user_input)
 
-    result = await outreach.run_outreach(niche=niche, location=location, auto_send=False)
+    result = await outreach.run_outreach(niche=extracted["niche"], location=extracted["location"], auto_send=False)
     state["agent_output"] = result
     return state
 

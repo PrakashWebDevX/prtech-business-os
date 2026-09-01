@@ -92,7 +92,8 @@ backend/
 ├── main.py                  # FastAPI entrypoint (/chat, /leads, /outreach/log, /monitor/add, /research/{id})
 ├── orchestrator/
 │   ├── supervisor.py        # LangGraph StateGraph wiring
-│   └── router.py            # Groq/Llama intent classification
+│   ├── router.py            # Groq intent classification
+│   └── param_extraction.py  # NIM-based niche/location extraction (lead_gen, outreach)
 ├── agents/
 │   ├── lead_gen.py          # implemented
 │   ├── outreach.py          # implemented (draft-only by default)
@@ -114,12 +115,16 @@ backend/
 
 ## Next steps (Step 4-7 from the build plan)
 
-1. All six agents are implemented. `lead_gen`/`outreach`/`research`/`social`
-   still parse params by crudely splitting the free-text `message` (e.g.
-   `" in "` for niche/location) — swap for a proper LLM extraction step so
-   multi-part requests like "email the dentists I found earlier" route
-   correctly. `form_fill`/`monitor` already take structured `params`
-   instead (see the Run section above), so they don't have this problem.
+1. All six agents are implemented. `lead_gen`/`outreach` now use LLM-based
+   param extraction (`orchestrator/param_extraction.py`, powered by NIM) to
+   pull niche/location out of free-text messages — handles phrasing like
+   "find me some dentists near Chennai" or "any plumbers around Bangalore?",
+   not just the old exact "X in Y" pattern. Falls back to a naive string
+   split if the NIM call ever fails, so a transient outage degrades
+   gracefully instead of breaking the request. `research`/`social` pass the
+   whole message through as-is (correct for those — no extraction needed).
+   `form_fill`/`monitor` take structured `params` instead (see the Run
+   section above).
 2. `monitor.py` only runs a single on-demand check — there's no built-in
    scheduler. Call `POST /monitor/add` (or route a `monitor` chat message)
    periodically via cron/an external scheduler to actually detect changes
