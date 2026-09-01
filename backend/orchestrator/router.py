@@ -14,11 +14,14 @@ replacement for the old 70B model).
 """
 
 import json
+import logging
 import os
 
 from groq import Groq
 
 from memory.shared_state import Intent, SharedState
+
+logger = logging.getLogger("prtech.orchestrator.router")
 
 _INTENTS: list[Intent] = ["lead_gen", "outreach", "social", "research", "form_fill", "monitor", "clarify"]
 
@@ -29,17 +32,29 @@ Classify the user's message into exactly one of: {", ".join(_INTENTS)}.
 - outreach: emailing/DMing leads that already exist
 - social: posting content or replying to comments/DMs on social platforms
 - research: answering a research question, summarizing sources
-- form_fill: filling out a web form from a dataset
-- monitor: watching a URL for changes
+- form_fill: filling out or submitting a web form (e.g. "fill the contact form",
+  "fill out this form", "submit this form with my data", "fill the test form")
+- monitor: watching a URL/page for changes (e.g. "watch this page", "monitor this URL",
+  "alert me if this page changes")
 - clarify: the request is ambiguous, off-topic, or missing info needed to route it
 
 Respond with ONLY a JSON object: {{"intent": "<one of the above>", "reason": "<one short sentence>"}}
-No markdown, no extra text.
+No markdown, no code fences, no extra text — just the raw JSON object.
 """
 
 
 def _get_groq_client() -> Groq:
     return Groq(api_key=os.environ["GROQ_API_KEY"])
+
+
+def _strip_markdown_fences(text: str) -> str:
+    text = text.strip()
+    if text.startswith("```"):
+        # Handles ```json\n{...}\n``` and plain ```\n{...}\n```
+        text = text.split("\n", 1)[1] if "\n" in text else text[3:]
+        if text.endswith("```"):
+            text = text[: -3]
+    return text.strip()
 
 
 def classify_intent(user_input: str) -> Intent:
@@ -53,14 +68,15 @@ def classify_intent(user_input: str) -> Intent:
         temperature=0,
         max_tokens=100,
     )
-    raw = resp.choices[0].message.content.strip()
+    raw = _strip_markdown_fences(resp.choices[0].message.content or "")
     try:
         parsed = json.loads(raw)
         intent = parsed.get("intent")
         if intent in _INTENTS:
             return intent  # type: ignore[return-value]
-    except (json.JSONDecodeError, AttributeError):
-        pass
+        logger.warning("router: model returned an intent not in the known set: %r | raw=%r", intent, raw)
+    except (json.JSONDecodeError, AttributeError) as exc:
+        logger.warning("router: failed to parse classifier output as JSON (%s) | raw=%r", exc, raw)
     return "clarify"
 
 
