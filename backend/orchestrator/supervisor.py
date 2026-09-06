@@ -17,6 +17,7 @@ from langgraph.graph import END, StateGraph
 
 from agents import form_fill, lead_gen, monitor, outreach, research, social_poster
 from memory.shared_state import SharedState
+from orchestrator.audit_log import with_audit
 from orchestrator.param_extraction import extract_niche_location
 from orchestrator.router import router_node
 
@@ -130,12 +131,12 @@ def build_supervisor_graph() -> StateGraph:
     graph = StateGraph(SharedState)
 
     graph.add_node("router", router_node)
-    graph.add_node("lead_gen", _lead_gen_node)
-    graph.add_node("outreach", _outreach_node)
-    graph.add_node("social", _social_node)
-    graph.add_node("research", _research_node)
-    graph.add_node("form_fill", _form_fill_node)
-    graph.add_node("monitor", _monitor_node)
+    graph.add_node("lead_gen", with_audit("lead_gen")(_lead_gen_node))
+    graph.add_node("outreach", with_audit("outreach")(_outreach_node))
+    graph.add_node("social", with_audit("social")(_social_node))
+    graph.add_node("research", with_audit("research")(_research_node))
+    graph.add_node("form_fill", with_audit("form_fill")(_form_fill_node))
+    graph.add_node("monitor", with_audit("monitor")(_monitor_node))
     graph.add_node("clarify", _clarify_node)
 
     graph.set_entry_point("router")

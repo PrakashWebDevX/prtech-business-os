@@ -70,6 +70,13 @@ Or register a monitor directly (bypasses the router):
 curl -X POST http://localhost:8000/monitor/add -H "Content-Type: application/json" -d "{\"url\": \"https://example.com/pricing\", \"alert_email\": \"you@example.com\"}"
 ```
 
+Every agent call writes a row to `agent_audit_log` — browse it (optionally filtered by agent):
+
+```
+curl http://localhost:8000/audit-log
+curl "http://localhost:8000/audit-log?agent=lead_gen"
+```
+
 ## Important caveats before you rely on this
 
 - **Scraping vs. ToS**: `agents/lead_gen.py`'s Google Maps scraper is a
@@ -100,7 +107,8 @@ backend/
 ├── orchestrator/
 │   ├── supervisor.py        # LangGraph StateGraph wiring
 │   ├── router.py            # Groq intent classification
-│   └── param_extraction.py  # NIM-based niche/location extraction (lead_gen, outreach)
+│   ├── param_extraction.py  # NIM-based niche/location extraction (lead_gen, outreach)
+│   └── audit_log.py         # writes every agent call to agent_audit_log
 ├── agents/
 │   ├── lead_gen.py          # implemented
 │   ├── outreach.py          # implemented (draft-only by default)
@@ -143,7 +151,11 @@ backend/
    require going through each platform's app-review process). Do not
    implement auto-posting via browser automation; it violates both
    platforms' Terms of Service and risks the account being banned.
-4. Add `agent_audit_log` writes to every agent node for debugging.
+4. `agent_audit_log` is now written by every agent — see
+   `orchestrator/audit_log.py`'s `with_audit(...)` decorator, applied to
+   each of the six agent nodes at graph-registration time (plus the direct
+   `/monitor/add` endpoint, which bypasses the graph). Browse it via
+   `GET /audit-log` (optionally `?agent=lead_gen` etc).
 5. Build the Next.js chat UI against `/chat`.
 6. Before flipping `auto_send=True` on Outreach or `dry_run=False` on
    Form-Fill anywhere real: confirm you're complying with applicable

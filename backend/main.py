@@ -24,6 +24,7 @@ logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"))
 logger = logging.getLogger("prtech.main")
 
 from orchestrator.supervisor import get_graph  # noqa: E402  (after load_dotenv)
+from orchestrator.audit_log import log_agent_action  # noqa: E402
 from agents import monitor as monitor_agent  # noqa: E402
 from tools.vector_store import select_rows  # noqa: E402
 
@@ -36,9 +37,9 @@ class ChatRequest(BaseModel):
     # Structured params for agents that can't reasonably be driven by free
     # text alone — form_fill needs {form_url, rows, field_selectors,
     # submit_selector?, dry_run?}; monitor needs {url, selector?,
-    # alert_email?}. Omit for lead_gen/outreach/research/social, which
-    # still parse from `message` (crudely — see supervisor.py's TODO on
-    # replacing that with real LLM extraction).
+    # alert_email?}. Omit for lead_gen/outreach, which extract niche/location
+    # from `message` via orchestrator/param_extraction.py; research/social
+    # just pass `message` through as-is.
     params: dict | None = None
 
 
@@ -93,11 +94,18 @@ async def add_monitor(req: MonitorAddRequest):
     scheduler) to actually detect changes over time; each call after the
     first compares against the most recent stored snapshot.
     """
-    return await monitor_agent.run_monitor_check(
-        url=req.url,
-        selector=req.selector,
-        alert_email=req.alert_email,
-    )
+    input_snapshot = {"url": req.url, "selector": req.selector, "alert_email": req.alert_email}
+    try:
+        result = await monitor_agent.run_monitor_check(
+            url=req.url,
+            selector=req.selector,
+            alert_email=req.alert_email,
+        )
+        log_agent_action("monitor", "direct_endpoint", input_snapshot, result, success=True)
+        return result
+    except Exception as exc:
+        log_agent_action("monitor", "direct_endpoint", input_snapshot, {"exception": str(exc)}, success=False)
+        raise
 
 
 @app.get("/research/{doc_id}")
@@ -106,6 +114,14 @@ async def get_research_doc(doc_id: str):
     if not rows:
         raise HTTPException(status_code=404, detail="Not found")
     return rows[0]
+
+
+@app.get("/audit-log")
+async def get_audit_log(agent: str | None = None, limit: int = 100):
+    filters = {}
+    if agent:
+        filters["agent"] = agent
+    return select_rows("agent_audit_log", filters=filters, limit=limit, order_by="created_at", desc=True)
 
 
 @app.get("/health")

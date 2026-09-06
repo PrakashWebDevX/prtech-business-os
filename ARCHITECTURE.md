@@ -100,8 +100,8 @@ FastAPI app exposing:
 - `POST /chat` — the main router entry point
 - `POST /monitor/add` — runs a Monitor check directly (bypasses intent
   classification; also how you'd trigger repeated checks from a scheduler)
-- `GET /leads`, `GET /outreach/log`, `GET /research/{id}` — read endpoints
-  for agent-produced data
+- `GET /leads`, `GET /outreach/log`, `GET /research/{id}`, `GET /audit-log`
+  — read endpoints for agent-produced data
 - `GET /health` — liveness check
 
 ### 3.2 `orchestrator/` — routing and coordination
@@ -116,6 +116,9 @@ FastAPI app exposing:
   because a naive `" in "` string split only handled one exact phrasing
   ("X in Y") and broke on anything else ("find me some dentists near X",
   "any plumbers around Y?").
+- **`audit_log.py`** — `with_audit(agent_name)` decorator, applied to each
+  of the six agent nodes at graph-registration time, writing every call's
+  input/output/success to `agent_audit_log` (see §5.9).
 
 ### 3.3 `agents/` — the six domains
 Each agent is a single `agents/<name>.py` module exposing an
@@ -165,7 +168,7 @@ leads              -- lead_gen writes; outreach reads
 outreach_log       -- outreach writes (only when auto_send=True)
 research_docs      -- research writes (embedding vector(2048), see §5.4)
 monitor_snapshots  -- monitor reads/writes every check
-agent_audit_log     -- schema exists; not yet written to by any agent (see roadmap)
+agent_audit_log     -- written by orchestrator/audit_log.py's with_audit(...) decorator, applied to every agent node
 ```
 
 Full definitions are in `backend/schema.sql`, which must be run manually in
@@ -272,6 +275,19 @@ nice-to-have; reproducing substantial chunks of someone else's article text
 is a copyright problem regardless of downstream use, so it's enforced at
 the prompt level rather than left to chance.
 
+### 5.9 Audit logging as a decorator, not per-agent boilerplate
+`orchestrator/audit_log.py`'s `with_audit(agent_name)` wraps a node
+function at graph-registration time in `supervisor.py`, rather than each of
+the six agent nodes calling a logging function internally. This guarantees
+identical audit coverage across all six agents (input snapshot, resulting
+output, a derived success/failure flag, and — for unhandled exceptions —
+the exception message) without six near-duplicate logging blocks, and means
+a future seventh agent gets audit logging for free just by using the same
+wrapper. The one call site that bypasses the graph entirely
+(`POST /monitor/add`) logs directly instead, since there's no node to wrap.
+A failure to *write* an audit row never breaks the actual request — it's
+diagnostic infrastructure, not a critical path.
+
 ## 6. Known limitations / prototype-grade pieces
 
 - **`lead_gen.py`'s Google Maps scraper** uses placeholder CSS selectors
@@ -283,7 +299,6 @@ the prompt level rather than left to chance.
 - **`monitor.py` has no built-in scheduler** — `run_monitor_check` performs
   one check per call. Real monitoring-over-time requires calling
   `POST /monitor/add` repeatedly via cron or an external scheduler.
-- **`agent_audit_log`** exists in the schema but nothing writes to it yet.
 - **No frontend** — `frontend/` is an empty placeholder; the original plan
   called for a Next.js chat UI against `/chat`, not yet built.
 - **Single Supabase project, no migrations** — `schema.sql` is applied by
