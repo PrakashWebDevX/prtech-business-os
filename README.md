@@ -5,17 +5,24 @@ specialized sub-agents (Lead-Gen, Outreach, Social Poster, Research,
 Form-Fill, Monitor) that share a Supabase memory layer and a common
 Playwright browser tool.
 
+For a full breakdown of how the system fits together — request lifecycle,
+component responsibilities, data model, and the reasoning behind key design
+decisions — see [ARCHITECTURE.md](./ARCHITECTURE.md).
+
 **Current status:** all six agents (`Lead-Gen`, `Outreach`, `Research`,
 `Social Poster`, `Form-Fill`, `Monitor`) plus `router`/`supervisor` are
-implemented end-to-end. Outreach and Social Poster both default to
-**draft-only** (nothing sent/posted) unless explicitly opted into
-auto-send/auto-post. Form-Fill defaults to **dry-run** (fills but never
-submits). Research paraphrases every source in its own words (never quotes
-verbatim); embedding storage into `research_docs` was intermittently
-failing due to NVIDIA NIM retiring embedding models — `tools/llm.py` now
-auto-discovers a live one, and `run_research`'s response includes an
-`embedding_errors` field so any future failure is visible directly in the
-API response instead of only in server logs.
+implemented, tested live, and confirmed working end-to-end. Outreach and
+Social Poster both default to **draft-only** (nothing sent/posted) unless
+explicitly opted into auto-send/auto-post. Form-Fill defaults to **dry-run**
+(fills but never submits). Research paraphrases every source in its own
+words (never quotes verbatim), and its embeddings are stored in
+`research_docs` for later semantic search — `tools/llm.py` auto-discovers a
+live NIM model for both chat and embeddings, since NVIDIA has retired
+several free-tier models mid-project, and any future embedding failure
+surfaces directly in the API response via an `embedding_errors` field
+instead of only in server logs. `lead_gen`/`outreach` use LLM-based param
+extraction rather than naive string-splitting, so natural phrasing beyond
+exact "X in Y" routes correctly.
 
 ## Setup
 
