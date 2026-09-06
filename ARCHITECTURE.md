@@ -129,7 +129,7 @@ the browser tool and the NIM client.
 
 | Agent | Default mode | External dependencies |
 |---|---|---|
-| `lead_gen` | — | Playwright (Google Maps scrape, prototype) |
+| `lead_gen` | — | OpenStreetMap (Nominatim geocoding + Overpass API) |
 | `outreach` | **draft-only** | NIM (drafting), SMTP (send) |
 | `research` | — | Tavily (search), NIM (paraphrase + embed) |
 | `social_poster` | **draft-only** | NIM (drafting); no publish backend wired in |
@@ -288,14 +288,33 @@ wrapper. The one call site that bypasses the graph entirely
 A failure to *write* an audit row never breaks the actual request — it's
 diagnostic infrastructure, not a critical path.
 
+### 5.10 Lead-Gen uses OpenStreetMap, not Google Maps or the Places API
+Earlier versions of `agents/lead_gen.py` scraped Google Maps with
+Playwright, using placeholder CSS selectors never verified against the
+live DOM. The obvious "proper" fix — the official Google Places API —
+turned out not to fit this project's constraints: Google now requires a
+billing-enabled Cloud account (a credit card on file) even to use its free
+monthly per-SKU allowance, having removed the old card-free free tier.
+
+The fix: OpenStreetMap's Nominatim (geocoding) and Overpass (business/POI
+data) APIs — both genuinely free, no API key, no signup, no billing
+account of any kind. This also means `lead_gen.py` no longer needs
+Playwright at all (same simplification as Research's move to Tavily),
+removing another category of fragility and the Windows-threading
+workaround from this agent entirely. The trade-off: OSM's listings are
+volunteer-maintained and can be sparser than Google's in less-mapped
+regions, and niche→OSM-tag mapping is necessarily a curated lookup table
+(`_NICHE_TAG_MAP`) rather than free-text search, so uncommon business
+categories may need a mapping added.
+
 ## 6. Known limitations / prototype-grade pieces
 
-- **`lead_gen.py`'s Google Maps scraper** uses placeholder CSS selectors
-  that will drift as Google's DOM changes, and scraping Maps may violate
-  its Terms of Service. For anything beyond local prototyping, swap
-  `_search_google_maps` for the official Google Places API — the function
-  is isolated specifically so this swap doesn't touch the rest of the
-  agent.
+- **`lead_gen.py`'s OSM data coverage varies by region** — OpenStreetMap's
+  business listings are volunteer-maintained, so results can be sparser
+  than Google Maps in less-mapped areas. The niche→OSM-tag mapping
+  (`_NICHE_TAG_MAP`) also only covers common categories; an unmapped niche
+  falls back to a generic `shop=<niche>` tag guess, which won't match
+  every possible business type.
 - **`monitor.py` has no built-in scheduler** — `run_monitor_check` performs
   one check per call. Real monitoring-over-time requires calling
   `POST /monitor/add` repeatedly via cron or an external scheduler.
@@ -314,9 +333,12 @@ diagnostic infrastructure, not a critical path.
   fits that. Drafting emails, posts, and paraphrasing research findings are
   generation tasks that benefit from a stronger model — NIM's free-tier
   catalog includes larger models suited to that.
-- **Playwright over `requests`/`BeautifulSoup`** for the browsing agents:
-  Google Maps and most real-world target forms are JS-rendered, so a real
-  browser is required, not just an HTTP client.
+- **Playwright over `requests`/`BeautifulSoup`** for the two remaining
+  browsing agents (`form_fill`, `monitor`): most real-world target forms
+  and many monitored pages are JS-rendered, so a real browser is required,
+  not just an HTTP client. `lead_gen` and `research` both moved off
+  Playwright entirely once real APIs (OpenStreetMap, Tavily) covered their
+  needs — see §5.5 and §5.10.
 - **Supabase over a self-hosted Postgres**: free tier, built-in pgvector
   support (no separate vector DB needed for Research's semantic memory),
   and a REST API via `postgrest` that avoids needing a persistent DB

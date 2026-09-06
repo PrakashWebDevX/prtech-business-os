@@ -79,11 +79,15 @@ curl "http://localhost:8000/audit-log?agent=lead_gen"
 
 ## Important caveats before you rely on this
 
-- **Scraping vs. ToS**: `agents/lead_gen.py`'s Google Maps scraper is a
-  prototype with placeholder selectors that will break as the DOM changes,
-  and browser-scraping Maps/JustDial may violate those sites' Terms of
-  Service. For anything beyond local prototyping, swap `_search_google_maps`
-  for the official Google Places API (see the docstring in that file).
+- **Lead data coverage**: `agents/lead_gen.py` uses OpenStreetMap
+  (Nominatim for geocoding, Overpass API for business data) — genuinely
+  free, no API key, no billing account required (unlike the official
+  Google Places API, which now requires a billing-enabled account even for
+  its free monthly allowance). Trade-off: OSM's business listings are
+  volunteer-maintained and can be sparser than Google Maps in some
+  regions — results depend on how well-mapped the target area is. Public
+  Nominatim/Overpass instances are also rate-limited for heavy use; see
+  the module docstring for self-hosting notes if you outgrow them.
 - **Outreach = cold email at scale**: the spec calls for rate limiting
   (`MAX_OUTREACH_PER_HOUR`) and a human-approval draft-only default before
   auto-send. Don't flip auto-send on without also handling unsubscribe
