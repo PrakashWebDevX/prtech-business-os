@@ -48,14 +48,6 @@ async def _outreach_node(state: SharedState) -> SharedState:
     return state
 
 
-async def _research_node(state: SharedState) -> SharedState:
-    question = state["user_input"]
-    result = await research.run_research(question)
-    state["agent_output"] = result
-    state.setdefault("shared_memory_refs", {})["research_docs"] = result.get("stored_doc_ids", [])
-    return state
-
-
 async def _social_node(state: SharedState) -> SharedState:
     # Treats the whole user_input as the content brief. auto_post is always
     # False here — the supervisor never auto-posts on its own, same
@@ -63,6 +55,14 @@ async def _social_node(state: SharedState) -> SharedState:
     brief = state["user_input"]
     result = await social_poster.run_social_poster(brief=brief, auto_post=False)
     state["agent_output"] = result
+    return state
+
+
+async def _research_node(state: SharedState) -> SharedState:
+    question = state["user_input"]
+    result = await research.run_research(question)
+    state["agent_output"] = result
+    state.setdefault("shared_memory_refs", {})["research_docs"] = result.get("stored_doc_ids", [])
     return state
 
 

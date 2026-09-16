@@ -11,15 +11,16 @@ PRTECH Business OS is a **supervisor-and-agents** architecture built on
 LangGraph. A single entry point (`POST /chat`) receives a free-text message
 (plus optional structured `params`), a router classifies intent, and control
 is handed to one of six specialized agents. Every agent shares the same
-Supabase database for persistence and the same Playwright-based browser tool
-for web automation.
+Supabase database for persistence; two of them (`form_fill`, `monitor`)
+also share a Playwright-based browser tool.
 
 ```
                          ┌─────────────────────────────────────────┐
                          │              FastAPI (main.py)           │
-                         │  POST /chat   POST /monitor/add           │
-                         │  GET  /leads  GET  /outreach/log          │
-                         │  GET  /research/{id}                      │
+                         │  POST /chat        POST /monitor/add      │
+                         │  POST /leads/enrich GET  /leads            │
+                         │  GET  /outreach/log GET  /research/{id}    │
+                         │  GET  /audit-log                           │
                          └───────────────────┬───────────────────────┘
                                               │
                                               ▼
@@ -44,6 +45,7 @@ for web automation.
          │lead_gen │ │outreach │ │ research │  │  social  │ │form_fill │ │ monitor │
          └────┬────┘ └────┬────┘ └────┬─────┘  └────┬─────┘ └────┬─────┘ └────┬────┘
               │           │           │             │            │            │
+              │  (each node wrapped in orchestrator/audit_log.py's with_audit)│
               └───────────┴─────┬─────┴─────────────┴────────────┴────────────┘
                                  ▼
                     ┌─────────────────────────┐        ┌──────────────────────┐
@@ -52,12 +54,18 @@ for web automation.
                     └─────────────────────────┘
                                  ▲
                     ┌────────────┴────────────┐
-                    │  tools/browser.py         │  (lead_gen, form_fill, monitor)
+                    │  tools/browser.py         │  (form_fill, monitor only)
                     │  tools/browser_runner.py   │  thread-isolated Playwright
                     │  tools/llm.py               │  NVIDIA NIM (chat + embeddings)
                     │  tools/email_sender.py      │  SMTP (outreach, monitor alerts)
                     └────────────────────────────┘
 ```
+
+Note: `lead_gen` (OpenStreetMap) and `research` (Tavily) do **not** use
+Playwright — both moved off browser automation onto real APIs during
+development (see §5.5 and §5.10). Only `form_fill` and `monitor` still need
+a real browser, since target forms and monitored pages are often
+JS-rendered.
 
 ## 2. Request lifecycle
 
@@ -85,13 +93,24 @@ Every `POST /chat` call follows the same path:
      selectors, or a URL to watch) that free text can't reliably carry, so
      the node returns a help message telling the caller what shape of
      `params` it expects if none was provided.
-5. **The agent itself** (in `agents/*.py`) does the actual work — browsing,
-   calling an LLM, reading/writing Supabase — and returns a plain dict.
-6. **The graph terminates** at `END`, and `main.py` returns
+5. **`with_audit(agent_name)`** (`orchestrator/audit_log.py`) wraps every
+   agent node at registration time, logging the call's input/output/success
+   to `agent_audit_log` regardless of which agent ran.
+6. **The agent itself** (in `agents/*.py`) does the actual work — searching,
+   calling an LLM, reading/writing Supabase, browsing where needed — and
+   returns a plain dict.
+7. **The graph terminates** at `END`, and `main.py` returns
    `{intent, agent_output}` as the HTTP response.
 
 Every node in the graph is `async def`, and the graph is driven with
 `ainvoke` rather than `invoke` — see §5.1 for why this matters.
+
+Two capabilities bypass the router entirely via dedicated endpoints, since
+they operate on existing data rather than being naturally triggered by a
+free-text message: `POST /monitor/add` (register/re-check a URL) and
+`POST /leads/enrich` (fill missing contact fields on an existing lead
+batch). Both still write to `agent_audit_log` via a direct call to
+`log_agent_action(...)`, since there's no graph node to wrap for them.
 
 ## 3. Component responsibilities
 
@@ -100,6 +119,8 @@ FastAPI app exposing:
 - `POST /chat` — the main router entry point
 - `POST /monitor/add` — runs a Monitor check directly (bypasses intent
   classification; also how you'd trigger repeated checks from a scheduler)
+- `POST /leads/enrich` — runs Lead-Gen's contact-info enrichment directly
+  on an existing lead batch (see §3.3 and §5.11)
 - `GET /leads`, `GET /outreach/log`, `GET /research/{id}`, `GET /audit-log`
   — read endpoints for agent-produced data
 - `GET /health` — liveness check
@@ -125,11 +146,13 @@ Each agent is a single `agents/<name>.py` module exposing an
 `async def run_<name>(...)` entry point with a domain-specific signature
 (not a shared interface — a lead-gen call and a monitor check take
 genuinely different arguments). All six share Supabase and, where relevant,
-the browser tool and the NIM client.
+the browser tool and the NIM client. `lead_gen.py` additionally exposes
+`enrich_leads(...)`, a second entry point for filling missing contact
+fields on leads already in the database (see §5.11).
 
 | Agent | Default mode | External dependencies |
 |---|---|---|
-| `lead_gen` | — | OpenStreetMap (Nominatim geocoding + Overpass API) |
+| `lead_gen` | — | OpenStreetMap (Nominatim geocoding + Overpass API); enrichment uses Tavily + NIM |
 | `outreach` | **draft-only** | NIM (drafting), SMTP (send) |
 | `research` | — | Tavily (search), NIM (paraphrase + embed) |
 | `social_poster` | **draft-only** | NIM (drafting); no publish backend wired in |
@@ -140,7 +163,8 @@ the browser tool and the NIM client.
 - **`browser.py`** — Playwright wrapper: `navigate`, `extract_text`,
   `extract_all`, `click`, `fill`, `screenshot`, plus
   `run_with_verification(...)` for retry + optional LLM self-check against
-  a screenshot before marking a browser action complete.
+  a screenshot before marking a browser action complete. Used only by
+  `form_fill` and `monitor` — see §3's note in the overview diagram.
 - **`browser_runner.py`** — runs a Playwright session in a dedicated
   thread with its own event loop. Exists specifically for Windows (see
   §5.2) but is a no-op-equivalent passthrough elsewhere.
@@ -150,9 +174,10 @@ the browser tool and the NIM client.
 - **`email_sender.py`** — plain SMTP sender used by `outreach` (sending
   drafted emails) and `monitor` (change alerts).
 - **`vector_store.py`** — Supabase helpers: generic `insert_rows` /
-  `select_rows` / `upsert_rows`, plus `insert_research_doc` and
-  `match_research_docs` (pgvector similarity search) for the Research
-  agent's memory.
+  `select_rows` / `upsert_rows` / `update_row`, plus `insert_research_doc`
+  and `match_research_docs` (pgvector similarity search) for the Research
+  agent's memory. `update_row` exists specifically for lead enrichment
+  (updating an existing row's phone/website without touching other fields).
 
 ### 3.5 `memory/shared_state.py` — the graph's state schema
 A `TypedDict` (`SharedState`) carrying `user_input`, `intent`,
@@ -164,7 +189,7 @@ writes `agent_output` before the graph terminates.
 ## 4. Data model (Supabase / Postgres + pgvector)
 
 ```sql
-leads              -- lead_gen writes; outreach reads
+leads              -- lead_gen writes; enrich_leads updates; outreach reads
 outreach_log       -- outreach writes (only when auto_send=True)
 research_docs      -- research writes (embedding vector(2048), see §5.4)
 monitor_snapshots  -- monitor reads/writes every check
@@ -202,12 +227,12 @@ The fix (`tools/browser_runner.py`): every Playwright session runs inside a
 dedicated background thread that creates its *own* fresh event loop under
 the Proactor policy (which does support subprocess creation), and the result
 is bridged back to the caller via `run_in_executor`. This is transparent to
-callers — `agents/lead_gen.py` and `agents/form_fill.py` just wrap their
+callers — `agents/form_fill.py` and `agents/monitor.py` just wrap their
 browsing logic in an inner `async def` and call
 `await run_playwright_task(inner_fn, ...)` instead of running it directly.
 
-`agents/research.py` sidesteps this issue entirely by not using Playwright
-at all — see §5.5.
+`agents/lead_gen.py` and `agents/research.py` sidestep this issue entirely
+by not using Playwright at all — see §5.5 and §5.10.
 
 ### 5.3 Model auto-discovery instead of hardcoded model strings
 Both NVIDIA NIM and Groq have retired specific free-tier models multiple
@@ -234,6 +259,11 @@ alter column ... type vector(N)` plus the matching `match_research_docs`
 function) needed to fix it. This is also why `research.py`'s response
 includes an `embedding_errors` field — so a failure is visible in the API
 response itself, not just in server logs.
+
+This is exactly how the project discovered that `nemotron-3-embed-1b`
+actually outputs 2048-dim vectors (not documented anywhere) rather than
+the 1024-dim the schema originally assumed based on the retired
+`nv-embedqa-e5-v5` model.
 
 ### 5.5 Research uses a real search API, not scraped search results
 Earlier versions of `agents/research.py` scraped DuckDuckGo's HTML results
@@ -283,10 +313,10 @@ identical audit coverage across all six agents (input snapshot, resulting
 output, a derived success/failure flag, and — for unhandled exceptions —
 the exception message) without six near-duplicate logging blocks, and means
 a future seventh agent gets audit logging for free just by using the same
-wrapper. The one call site that bypasses the graph entirely
-(`POST /monitor/add`) logs directly instead, since there's no node to wrap.
-A failure to *write* an audit row never breaks the actual request — it's
-diagnostic infrastructure, not a critical path.
+wrapper. The two call sites that bypass the graph entirely
+(`POST /monitor/add`, `POST /leads/enrich`) log directly instead, since
+there's no node to wrap. A failure to *write* an audit row never breaks the
+actual request — it's diagnostic infrastructure, not a critical path.
 
 ### 5.10 Lead-Gen uses OpenStreetMap, not Google Maps or the Places API
 Earlier versions of `agents/lead_gen.py` scraped Google Maps with
@@ -307,6 +337,19 @@ regions, and niche→OSM-tag mapping is necessarily a curated lookup table
 (`_NICHE_TAG_MAP`) rather than free-text search, so uncommon business
 categories may need a mapping added.
 
+### 5.11 Lead enrichment as a separate, explicit step
+OSM listings frequently carry a business's name and location reliably but
+not its phone or website — contact fields are tagged far less consistently
+by whoever mapped the entry. Rather than trying to guess contact info at
+scrape time, `enrich_leads()` (exposed via `POST /leads/enrich`, not routed
+through `/chat`) is a deliberately separate, explicit step: find leads
+missing phone/website, search the web via Tavily, ask NIM to extract a
+confident phone/website match, and update *only* the missing fields —
+never overwriting data that's already there. It's a direct endpoint rather
+than a `/chat` intent because it operates on an existing lead batch (a
+maintenance/backfill action) rather than being something a natural-language
+message should trigger on its own.
+
 ## 6. Known limitations / prototype-grade pieces
 
 - **`lead_gen.py`'s OSM data coverage varies by region** — OpenStreetMap's
@@ -314,7 +357,9 @@ categories may need a mapping added.
   than Google Maps in less-mapped areas. The niche→OSM-tag mapping
   (`_NICHE_TAG_MAP`) also only covers common categories; an unmapped niche
   falls back to a generic `shop=<niche>` tag guess, which won't match
-  every possible business type.
+  every possible business type. `enrich_leads()` helps with contact-field
+  gaps but is itself best-effort — Tavily searches don't always surface a
+  confident phone/website match.
 - **`monitor.py` has no built-in scheduler** — `run_monitor_check` performs
   one check per call. Real monitoring-over-time requires calling
   `POST /monitor/add` repeatedly via cron or an external scheduler.

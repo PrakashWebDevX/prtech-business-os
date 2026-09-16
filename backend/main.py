@@ -25,6 +25,7 @@ logger = logging.getLogger("prtech.main")
 
 from orchestrator.supervisor import get_graph  # noqa: E402  (after load_dotenv)
 from orchestrator.audit_log import log_agent_action  # noqa: E402
+from agents import lead_gen  # noqa: E402
 from agents import monitor as monitor_agent  # noqa: E402
 from tools.vector_store import select_rows  # noqa: E402
 
@@ -72,6 +73,43 @@ async def get_leads(niche: str | None = None, location: str | None = None, limit
     if location:
         filters["location"] = location
     return select_rows("leads", filters=filters, limit=limit)
+
+
+class LeadsEnrichRequest(BaseModel):
+    niche: str | None = None
+    location: str | None = None
+    lead_ids: list[str] | None = None
+    max_leads: int = 20
+
+
+@app.post("/leads/enrich")
+async def enrich_leads_endpoint(req: LeadsEnrichRequest):
+    """
+    Finds leads (filtered by niche/location, or specific lead_ids) that are
+    missing phone and/or website, and tries to fill those gaps via a Tavily
+    search + NIM extraction per lead. Never overwrites a field that already
+    has a value. Bypasses the /chat router entirely — this operates on an
+    existing lead batch rather than being something free-text routing
+    should trigger.
+    """
+    input_snapshot = {
+        "niche": req.niche,
+        "location": req.location,
+        "lead_ids": req.lead_ids,
+        "max_leads": req.max_leads,
+    }
+    try:
+        result = await lead_gen.enrich_leads(
+            niche=req.niche,
+            location=req.location,
+            lead_ids=req.lead_ids,
+            max_leads=req.max_leads,
+        )
+        log_agent_action("lead_gen", "enrich", input_snapshot, result, success=True)
+        return result
+    except Exception as exc:
+        log_agent_action("lead_gen", "enrich", input_snapshot, {"exception": str(exc)}, success=False)
+        raise
 
 
 @app.get("/outreach/log")

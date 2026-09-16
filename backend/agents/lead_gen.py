@@ -18,7 +18,9 @@ constraint. OpenStreetMap has no such requirement.
 Trade-off to know about: OSM's business-listing coverage is volunteer-
 maintained and can be sparser than Google Maps in some regions, especially
 for small/informal businesses. Results will vary by how well-mapped the
-target area is.
+target area is. In particular, contact fields (phone/website/email) are
+tagged far less consistently than name/location — `enrich_leads` below
+exists specifically to help fill those gaps.
 
 Public Overpass/Nominatim instances are rate-limited (Nominatim: ~1
 request/second; Overpass: a few hundred queries/day for moderate-sized
@@ -27,14 +29,17 @@ run against paid/self-hosted Overpass infrastructure instead of the public
 endpoint used here.
 """
 
+import json
 import logging
+import os
 import re
 from dataclasses import asdict, dataclass
 from typing import Optional
 
 import httpx
 
-from tools.vector_store import insert_rows, select_rows
+from tools.llm import nim_complete
+from tools.vector_store import insert_rows, select_rows, update_row
 
 logger = logging.getLogger("prtech.agents.lead_gen")
 
@@ -255,4 +260,144 @@ async def run_lead_gen(niche: str, location: str, max_results: int = 20) -> dict
         "inserted": len(inserted),
         "skipped_duplicates": len(raw_leads) - len(new_leads),
         "lead_ids": [row.get("id") for row in inserted],
+    }
+
+
+# --- Lead enrichment -------------------------------------------------------
+#
+# OSM listings frequently have a business's name and location but not its
+# phone/website (see the module docstring's trade-off note). enrich_leads
+# tries to fill those gaps by searching the web via Tavily (same free-tier
+# API the Research agent uses) and asking NIM to extract a phone number and
+# website URL from the results, then updating only the missing fields on
+# the existing Supabase row — it never overwrites a field that already has
+# a value.
+
+_TAVILY_SEARCH_URL = "https://api.tavily.com/search"
+
+_ENRICH_SYSTEM_PROMPT = """You are extracting contact details for a business from web
+search result snippets. You will be given the business name, its location, and several
+raw text snippets that may or may not mention it.
+
+Rules:
+- Only extract a phone number or website if you are reasonably confident it belongs to
+  THIS specific business at THIS location, not a different business with a similar name.
+- phone: return in whatever format it appears, or null if not confidently found.
+- website: return the business's own website URL, not a directory/listing page that
+  merely mentions it (e.g. not a Yelp/JustDial/Facebook page unless that's genuinely
+  the only web presence found) — null if not confidently found.
+- If nothing reliable is found, return nulls rather than guessing.
+
+Respond with ONLY a JSON object: {"phone": "<string or null>", "website": "<string or null>"}
+No markdown, no code fences, no extra text.
+"""
+
+
+def _tavily_search_snippets(query: str, max_results: int = 3) -> str:
+    api_key = os.environ.get("TAVILY_API_KEY")
+    if not api_key:
+        logger.error("lead_gen: TAVILY_API_KEY is not set — cannot enrich leads. Add it to .env.")
+        return ""
+
+    try:
+        resp = httpx.post(
+            _TAVILY_SEARCH_URL,
+            json={"api_key": api_key, "query": query, "max_results": max_results, "search_depth": "basic"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:  # noqa: BLE001
+        logger.error("lead_gen: Tavily search failed during enrichment for %r: %s", query, exc)
+        return ""
+
+    results = data.get("results", [])
+    return "\n\n".join(f"({r.get('url')}) {r.get('content', '')}" for r in results)
+
+
+def _extract_contact_info(business_name: str, location: str, snippets: str) -> dict:
+    if not snippets.strip():
+        return {"phone": None, "website": None}
+
+    user_prompt = f"Business: {business_name}\nLocation: {location}\n\nSearch snippets:\n{snippets}"
+    try:
+        raw = nim_complete(_ENRICH_SYSTEM_PROMPT, user_prompt, temperature=0, max_tokens=100)
+        cleaned = raw.strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+        parsed = json.loads(cleaned.strip())
+        return {"phone": parsed.get("phone") or None, "website": parsed.get("website") or None}
+    except Exception as exc:  # noqa: BLE001 - degrade to "found nothing" rather than fail the whole batch
+        logger.warning("lead_gen: contact extraction failed for %r: %s", business_name, exc)
+        return {"phone": None, "website": None}
+
+
+async def enrich_leads(
+    niche: Optional[str] = None,
+    location: Optional[str] = None,
+    lead_ids: Optional[list[str]] = None,
+    max_leads: int = 20,
+) -> dict:
+    """
+    Finds leads missing phone and/or website, tries to fill them in via
+    Tavily search + NIM extraction, and updates only the missing fields —
+    existing data is never overwritten. Returns a summary; does not raise
+    on a per-lead failure, so one bad lookup doesn't stop the batch.
+    """
+    if lead_ids:
+        candidates = []
+        for lid in lead_ids:
+            rows = select_rows("leads", filters={"id": lid}, limit=1)
+            candidates.extend(rows)
+    else:
+        filters = {}
+        if niche:
+            filters["niche"] = niche
+        if location:
+            filters["location"] = location
+        candidates = select_rows("leads", filters=filters, limit=1000)
+
+    # Only bother with leads actually missing something to fill in.
+    candidates = [c for c in candidates if not c.get("phone") or not c.get("website")]
+    candidates = candidates[:max_leads]
+
+    if not candidates:
+        return {"checked": 0, "enriched": 0, "still_missing": 0, "results": []}
+
+    results = []
+    enriched_count = 0
+
+    for lead in candidates:
+        query = f"{lead['business_name']} {lead['location']} phone number website contact"
+        snippets = _tavily_search_snippets(query)
+        found = _extract_contact_info(lead["business_name"], lead["location"], snippets)
+
+        updates = {}
+        if found["phone"] and not lead.get("phone"):
+            updates["phone"] = found["phone"]
+        if found["website"] and not lead.get("website"):
+            updates["website"] = found["website"]
+
+        entry = {"lead_id": lead["id"], "business_name": lead["business_name"], "updated_fields": list(updates.keys())}
+
+        if updates:
+            update_row("leads", lead["id"], updates)
+            enriched_count += 1
+
+        results.append(entry)
+
+    logger.info(
+        "lead_gen: enrich_leads checked=%s enriched=%s still_missing=%s",
+        len(candidates),
+        enriched_count,
+        len(candidates) - enriched_count,
+    )
+
+    return {
+        "checked": len(candidates),
+        "enriched": enriched_count,
+        "still_missing": len(candidates) - enriched_count,
+        "results": results,
     }

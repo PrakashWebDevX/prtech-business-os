@@ -14,14 +14,14 @@ No OpenAI usage anywhere in this project.
 Model auto-discovery: NVIDIA's free NIM catalog has retired multiple models
 in quick succession (meta/llama-3.1-70b-instruct, meta/llama-3.3-70b-
 instruct, and nvidia/nv-embedqa-e5-v5 all went HTTP 410 Gone within the
-same week during development of this project). Hardcoding a single model
-string means the whole app breaks every time NVIDIA retires whatever we
-picked. Instead, at first use this module calls NIM's /v1/models endpoint
-(an OpenAI-compatible model listing) and picks the first live match from a
-preference list below, for both the chat model and the embedding model. If
-you set NVIDIA_MODEL / NVIDIA_EMBED_MODEL in .env, that's tried first and
-only used if it's actually still available — otherwise auto-discovery
-takes over instead of hard failing.
+same development window). Hardcoding a single model string means the whole
+app breaks every time NVIDIA retires whatever we picked. Instead, at first
+use this module calls NIM's /v1/models endpoint (an OpenAI-compatible model
+listing) and picks the first live match from a preference list below, for
+both the chat model and the embedding model. If you set NVIDIA_MODEL /
+NVIDIA_EMBED_MODEL in .env, that's tried first and only used if it's
+actually still available — otherwise auto-discovery takes over instead of
+hard failing.
 """
 
 import logging

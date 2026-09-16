@@ -4,24 +4,15 @@ create extension if not exists pgcrypto;
 
 create table if not exists leads (
   id uuid primary key default gen_random_uuid(),
-  niche text,
-  location text,
-  business_name text,
-  phone text,
-  email text,
-  website text,
-  socials jsonb,
-  score float,
-  created_at timestamptz default now()
+  niche text, location text, business_name text,
+  phone text, email text, website text, socials jsonb,
+  score float, created_at timestamptz default now()
 );
 
 create table if not exists outreach_log (
   id uuid primary key default gen_random_uuid(),
   lead_id uuid references leads(id),
-  channel text,
-  message text,
-  status text,
-  sent_at timestamptz
+  channel text, message text, status text, sent_at timestamptz
 );
 
 create table if not exists research_docs (
@@ -40,9 +31,7 @@ create table if not exists research_docs (
 
 create table if not exists monitor_snapshots (
   id uuid primary key default gen_random_uuid(),
-  url text,
-  content_hash text,
-  captured_at timestamptz default now()
+  url text, content_hash text, captured_at timestamptz default now()
 );
 
 create table if not exists agent_audit_log (

@@ -54,6 +54,13 @@ def upsert_rows(table: str, rows: list[dict[str, Any]], on_conflict: str) -> lis
     return resp.data or []
 
 
+def update_row(table: str, row_id: str, updates: dict[str, Any]) -> list[dict[str, Any]]:
+    if not updates:
+        return []
+    resp = get_client().table(table).update(updates).eq("id", row_id).execute()
+    return resp.data or []
+
+
 def insert_research_doc(query: str, content: str, embedding: list[float], source_url: str) -> dict[str, Any]:
     resp = (
         get_client()
@@ -68,7 +75,7 @@ def match_research_docs(embedding: list[float], match_count: int = 5) -> list[di
     """
     Requires a `match_research_docs` RPC function defined in Supabase, e.g.:
 
-    create or replace function match_research_docs(query_embedding vector(1024), match_count int)
+    create or replace function match_research_docs(query_embedding vector(2048), match_count int)
     returns setof research_docs language sql as $$
       select * from research_docs
       order by embedding <-> query_embedding

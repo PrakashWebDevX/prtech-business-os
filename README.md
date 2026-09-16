@@ -22,7 +22,9 @@ several free-tier models mid-project, and any future embedding failure
 surfaces directly in the API response via an `embedding_errors` field
 instead of only in server logs. `lead_gen`/`outreach` use LLM-based param
 extraction rather than naive string-splitting, so natural phrasing beyond
-exact "X in Y" routes correctly.
+exact "X in Y" routes correctly. Lead-Gen sources data from OpenStreetMap
+(free, no API key, no card) rather than scraping Google Maps, and can
+optionally enrich leads missing phone/website via `POST /leads/enrich`.
 
 ## Setup
 
@@ -33,9 +35,10 @@ pip install -r requirements.txt
 playwright install chromium
 
 cp .env.example .env
-# fill in NVIDIA_API_KEY, GROQ_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
+# fill in NVIDIA_API_KEY, GROQ_API_KEY, TAVILY_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
 # NVIDIA_API_KEY: free key from https://build.nvidia.com
 # GROQ_API_KEY: free key from https://console.groq.com
+# TAVILY_API_KEY: free key from https://app.tavily.com
 ```
 
 Then run `backend/schema.sql` in the Supabase SQL editor to create the
@@ -70,11 +73,28 @@ Or register a monitor directly (bypasses the router):
 curl -X POST http://localhost:8000/monitor/add -H "Content-Type: application/json" -d "{\"url\": \"https://example.com/pricing\", \"alert_email\": \"you@example.com\"}"
 ```
 
+Fill in missing phone/website on existing leads (OSM data often has name +
+location but not contact details — see the caveat below):
+
+```
+curl -X POST http://localhost:8000/leads/enrich -H "Content-Type: application/json" -d "{\"niche\": \"dentists\", \"location\": \"Coimbatore\", \"max_leads\": 20}"
+```
+
 Every agent call writes a row to `agent_audit_log` — browse it (optionally filtered by agent):
 
 ```
 curl http://localhost:8000/audit-log
 curl "http://localhost:8000/audit-log?agent=lead_gen"
+```
+
+**If you're on Windows PowerShell** (not cmd.exe — check your prompt),
+`curl` is aliased to `Invoke-WebRequest`/`Invoke-RestMethod` and needs
+different syntax. The equivalent for any of the above:
+
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8000/chat" -Method Post -ContentType "application/json" -Body '{"message": "find dentists in Coimbatore"}'
+Invoke-RestMethod -Uri "http://localhost:8000/leads/enrich" -Method Post -ContentType "application/json" -Body '{"niche": "dentists", "location": "Coimbatore", "max_leads": 20}'
+Invoke-RestMethod -Uri "http://localhost:8000/audit-log" -Method Get
 ```
 
 ## Important caveats before you rely on this
@@ -88,6 +108,9 @@ curl "http://localhost:8000/audit-log?agent=lead_gen"
   regions — results depend on how well-mapped the target area is. Public
   Nominatim/Overpass instances are also rate-limited for heavy use; see
   the module docstring for self-hosting notes if you outgrow them.
+  Contact fields (phone/website/email) are tagged far less consistently
+  than name/location — use `POST /leads/enrich` to try to fill those gaps
+  via web search, though it won't find everything either.
 - **Outreach = cold email at scale**: the spec calls for rate limiting
   (`MAX_OUTREACH_PER_HOUR`) and a human-approval draft-only default before
   auto-send. Don't flip auto-send on without also handling unsubscribe
@@ -107,14 +130,14 @@ curl "http://localhost:8000/audit-log?agent=lead_gen"
 
 ```
 backend/
-├── main.py                  # FastAPI entrypoint (/chat, /leads, /outreach/log, /monitor/add, /research/{id})
+├── main.py                  # FastAPI entrypoint (/chat, /leads, /leads/enrich, /outreach/log, /monitor/add, /research/{id}, /audit-log)
 ├── orchestrator/
 │   ├── supervisor.py        # LangGraph StateGraph wiring
 │   ├── router.py            # Groq intent classification
 │   ├── param_extraction.py  # NIM-based niche/location extraction (lead_gen, outreach)
 │   └── audit_log.py         # writes every agent call to agent_audit_log
 ├── agents/
-│   ├── lead_gen.py          # implemented
+│   ├── lead_gen.py          # implemented (OpenStreetMap; includes enrich_leads)
 │   ├── outreach.py          # implemented (draft-only by default)
 │   ├── social_poster.py     # implemented (draft-only by default)
 │   ├── research.py          # implemented
@@ -122,8 +145,9 @@ backend/
 │   └── monitor.py           # implemented (single on-demand check; no built-in scheduler)
 ├── tools/
 │   ├── browser.py           # Playwright wrapper + retry/self-check
-│   ├── llm.py                # NVIDIA NIM helper (free tier, planning/writing)
-│   ├── email_sender.py       # SMTP sender used by Outreach
+│   ├── browser_runner.py    # thread-isolated Playwright sessions (Windows compatibility)
+│   ├── llm.py                # NVIDIA NIM helper (free tier, auto-discovers live models)
+│   ├── email_sender.py       # SMTP sender used by Outreach and Monitor alerts
 │   └── vector_store.py       # Supabase helpers (leads, outreach_log, research_docs, ...)
 ├── memory/
 │   └── shared_state.py      # LangGraph state schema
@@ -158,8 +182,8 @@ backend/
 4. `agent_audit_log` is now written by every agent — see
    `orchestrator/audit_log.py`'s `with_audit(...)` decorator, applied to
    each of the six agent nodes at graph-registration time (plus the direct
-   `/monitor/add` endpoint, which bypasses the graph). Browse it via
-   `GET /audit-log` (optionally `?agent=lead_gen` etc).
+   `/monitor/add` and `/leads/enrich` endpoints, which bypass the graph).
+   Browse it via `GET /audit-log` (optionally `?agent=lead_gen` etc).
 5. Build the Next.js chat UI against `/chat`.
 6. Before flipping `auto_send=True` on Outreach or `dry_run=False` on
    Form-Fill anywhere real: confirm you're complying with applicable
@@ -169,3 +193,6 @@ backend/
 7. If Research's `embedding_errors` field ever comes back non-empty, that
    tells you exactly which NIM embedding call failed and why — no more
    digging through server logs needed, the API response carries it now.
+8. `POST /leads/enrich` uses Tavily search + NIM extraction and can be
+   extended to run automatically after `lead_gen` finds new leads, rather
+   than requiring a separate manual call.
