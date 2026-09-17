@@ -56,7 +56,12 @@ class SmokeTest:
     results: list[TestResult] = field(default_factory=list)
 
     def __post_init__(self):
-        self.client = httpx.Client(base_url=self.base_url, timeout=60)
+        # Research in particular does sequential per-source work (Tavily
+        # search, then a NIM paraphrase call + a NIM embedding call PER
+        # result, then a final NIM synthesis call) — 60s was empirically
+        # too tight for that agent with several sources and caused a false
+        # failure here, not an actual problem in research.py.
+        self.client = httpx.Client(base_url=self.base_url, timeout=120)
 
     def run(self, name: str, fn: Callable[[], tuple[bool, str]]) -> None:
         start = time.time()
