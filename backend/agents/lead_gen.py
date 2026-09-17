@@ -322,7 +322,23 @@ def _extract_contact_info(business_name: str, location: str, snippets: str) -> d
 
     user_prompt = f"Business: {business_name}\nLocation: {location}\n\nSearch snippets:\n{snippets}"
     try:
-        raw = nim_complete(_ENRICH_SYSTEM_PROMPT, user_prompt, temperature=0, max_tokens=100)
+        # max_tokens is intentionally generous here (unlike the shorter
+        # classification/extraction calls elsewhere in this codebase).
+        # openai/gpt-oss-20b (NIM's current auto-selected chat model as of
+        # this fix) is a reasoning model that spends tokens on internal
+        # "thinking" before emitting its final answer — with this prompt's
+        # longer input (multiple search snippets + a confidence judgment),
+        # a 100-token budget was empirically observed to run out before any
+        # visible output, returning an empty string 19/20 times in testing.
+        raw = nim_complete(_ENRICH_SYSTEM_PROMPT, user_prompt, temperature=0, max_tokens=500)
+        if not raw.strip():
+            logger.warning(
+                "lead_gen: contact extraction for %r got an empty response from the model "
+                "(likely ran out of token budget on internal reasoning) — treating as not found",
+                business_name,
+            )
+            return {"phone": None, "website": None}
+
         cleaned = raw.strip()
         if cleaned.startswith("```"):
             cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
