@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass
 from typing import Optional
 
 import httpx
+from tenacity import retry, stop_after_attempt, wait_exponential
 
 from tools.llm import nim_complete
 from tools.vector_store import insert_rows, select_rows, update_row
@@ -334,6 +335,11 @@ def _extract_contact_info(business_name: str, location: str, snippets: str) -> d
         return {"phone": None, "website": None}
 
 
+@retry(stop=stop_after_attempt(3), wait=wait_exponential(min=1, max=6))
+def _select_rows_with_retry(*args, **kwargs) -> list[dict]:
+    return select_rows(*args, **kwargs)
+
+
 async def enrich_leads(
     niche: Optional[str] = None,
     location: Optional[str] = None,
@@ -345,11 +351,16 @@ async def enrich_leads(
     Tavily search + NIM extraction, and updates only the missing fields —
     existing data is never overwritten. Returns a summary; does not raise
     on a per-lead failure, so one bad lookup doesn't stop the batch.
+
+    The initial Supabase reads retry up to 3 times with backoff — a single
+    transient DNS/network blip (which has happened repeatedly against
+    Groq/Supabase during development on this network) shouldn't hard-fail
+    the whole request.
     """
     if lead_ids:
         candidates = []
         for lid in lead_ids:
-            rows = select_rows("leads", filters={"id": lid}, limit=1)
+            rows = _select_rows_with_retry("leads", filters={"id": lid}, limit=1)
             candidates.extend(rows)
     else:
         filters = {}
@@ -357,7 +368,7 @@ async def enrich_leads(
             filters["niche"] = niche
         if location:
             filters["location"] = location
-        candidates = select_rows("leads", filters=filters, limit=1000)
+        candidates = _select_rows_with_retry("leads", filters=filters, limit=1000)
 
     # Only bother with leads actually missing something to fill in.
     candidates = [c for c in candidates if not c.get("phone") or not c.get("website")]
