@@ -97,6 +97,32 @@ Invoke-RestMethod -Uri "http://localhost:8000/leads/enrich" -Method Post -Conten
 Invoke-RestMethod -Uri "http://localhost:8000/audit-log" -Method Get
 ```
 
+## Smoke testing
+
+Rather than manually re-running curl commands for every agent after a
+dependency update or a provider retiring a model (which has happened
+multiple times during this project's development — see ARCHITECTURE.md
+§5.3), run the smoke test script against a live server:
+
+```bash
+# with uvicorn already running in another terminal
+python scripts/smoke_test.py
+```
+
+Exercises all six agents plus `/audit-log`, checks response shapes (and,
+critically, that Outreach/Social genuinely default to `draft_only` rather
+than silently auto-sending), and prints a pass/fail summary. Exit code is 0
+if everything passed, 1 otherwise — safe to use in a CI step, not just
+interactively.
+
+```bash
+# skip the slower browser/network-heavy agents for a quick LLM-only check
+python scripts/smoke_test.py --skip lead_gen,monitor,form_fill
+
+# point at a different host/port
+python scripts/smoke_test.py --base-url http://localhost:8080
+```
+
 ## Important caveats before you rely on this
 
 - **Lead data coverage**: `agents/lead_gen.py` uses OpenStreetMap
@@ -151,6 +177,8 @@ backend/
 │   └── vector_store.py       # Supabase helpers (leads, outreach_log, research_docs, ...)
 ├── memory/
 │   └── shared_state.py      # LangGraph state schema
+├── scripts/
+│   └── smoke_test.py        # end-to-end test against a live server (see Smoke testing above)
 ├── schema.sql
 ├── requirements.txt
 └── .env.example
